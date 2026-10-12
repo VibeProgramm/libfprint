@@ -39,6 +39,11 @@ Goal (not upstream-merge): track upstream master with minimum own delta.
 4. `meson setup /tmp/...` (no `-Dc_args` crutch — tree must be
    warning-free) + `ninja` + `meson test` (expect: unit OK, replay
    SKIP without umockdev, metainfo may fail offline — pre-existing).
+5. MANDATORY verify gate (lesson from the 0xd4 regression that slipped
+   through): after implement, a separate verify agent MUST review the
+   diff for behavior changes on error paths (not only memory safety),
+   rebuild strict in /tmp and run the replay test when available.
+   No merge/install without a clean verify verdict.
 5. Hardware gate (27c6:5110): install, restart fprintd, B1 (disconnect
    under active verify → journal delta ≤ 6, fast fail, daemon alive)
    + B2 (disconnect idle → delta ≤ 6, same PID), recovery without
