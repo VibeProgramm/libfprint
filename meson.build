@@ -141,6 +141,7 @@ drivers_info = {
     'upeksonly': {},
     'upekts': {},
     'goodixmoc': {},
+    'goodixtls511': { 'helper': ['goodixtls'] },
     'nb1010': {},
     'fpcmoc': {},
     'realtek': {},
@@ -243,6 +244,16 @@ foreach i : driver_helpers
         endif
 
         optional_deps += openssl_dep
+    elif i == 'goodixtls'
+        if get_option('goodixtls').disabled()
+            error('goodixtls511 driver requested but -Dgoodixtls=disabled')
+        endif
+        gnutls_goodix_dep = dependency('gnutls', version: '>= 3.6.0',
+                                       required: get_option('goodixtls'))
+        if not gnutls_goodix_dep.found()
+            error('gnutls >= 3.6.0 is required for @0@'.format(driver))
+        endif
+        optional_deps += gnutls_goodix_dep
     elif i == 'udev'
         install_udev_rules = true
 
