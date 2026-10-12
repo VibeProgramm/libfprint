@@ -56,6 +56,13 @@ typedef struct
   GCancellable *transfer_cancel_tkn;
   gboolean inited;
 
+  /* A bulk IN read is currently submitted and its completion has not
+   * fired yet. goodix_start_read_loop() must not submit a second one
+   * while this is set: overlapping reads would consume replay/queue
+   * entries out of order. An in-flight read transparently survives
+   * goodix_stop_read_loop() and is adopted by the next generation. */
+  gboolean read_pending;
+
   /* Consecutive bulk-transfer failures in the read loop. Used to break
    * out of the resubmit cycle when the device is gone instead of
    * spinning at 100% CPU (see goodix_receive_data_cb). Reset on every
@@ -418,6 +425,9 @@ goodix_receive_data_cb(FpiUsbTransfer *transfer, FpDevice *dev, gpointer user_da
   FpiDeviceGoodixTls *self = FPI_DEVICE_GOODIXTLS(dev);
   FpiDeviceGoodixTlsPrivate *priv = fpi_device_goodixtls_get_instance_private(self);
 
+  /* The flight has landed. */
+  priv->read_pending = FALSE;
+
   if (!priv->inited || g_cancellable_is_cancelled(priv->transfer_cancel_tkn))
     {
       /* The loop was stopped via goodix_stop_read_loop() (action
@@ -516,13 +526,21 @@ goodix_start_read_loop(FpDevice *dev)
   if (g_cancellable_is_cancelled(priv->transfer_cancel_tkn))
     g_cancellable_reset(priv->transfer_cancel_tkn);
 
-  goodix_receive_data(dev);
+  /* Do not overlap reads: an in-flight transfer orphaned by
+   * goodix_stop_read_loop() still owns the next device bytes and is
+   * adopted on completion, so submitting another one here would consume
+   * queue entries out of order. */
+  if (!priv->read_pending)
+    goodix_receive_data(dev);
 }
 
 /* Stop the background read loop started by goodix_start_read_loop().
- * Aborts the in-flight bulk transfer by cancelling the private token;
- * the callback then fails the pending command (see
- * goodix_receive_data_cb) instead of resubmitting.
+ * Only marks the loop stopped; the in-flight bulk transfer (if any) is
+ * deliberately NOT aborted so that its bytes are not lost: it completes
+ * normally and is adopted by the next goodix_start_read_loop() generation
+ * (or dropped when no command is pending). Aborting it mid-test wedges
+ * the device/replay queue: the restart's replacement read then never
+ * completes and the next command dies on timeout.
  * Idempotent: safe to call from deactivate, cancel and deinit paths. */
 void
 goodix_stop_read_loop(FpDevice *dev)
@@ -531,8 +549,6 @@ goodix_stop_read_loop(FpDevice *dev)
   FpiDeviceGoodixTlsPrivate *priv = fpi_device_goodixtls_get_instance_private(self);
 
   priv->inited = FALSE;
-  if (priv->transfer_cancel_tkn)
-    g_cancellable_cancel(priv->transfer_cancel_tkn);
 }
 
 void
@@ -547,6 +563,7 @@ goodix_receive_data(FpDevice *dev)
 
   fpi_usb_transfer_fill_bulk(transfer, class->ep_in, GOODIX_EP_IN_MAX_BUF_SIZE);
 
+  priv->read_pending = TRUE;
   fpi_usb_transfer_submit(transfer, 0, priv->transfer_cancel_tkn, goodix_receive_data_cb,
                           NULL);
 }
@@ -1177,6 +1194,7 @@ goodix_dev_init(FpDevice *dev, GError **error)
   priv->length = 0;
   priv->transfer_cancel_tkn = g_cancellable_new();
   priv->consecutive_errors = 0;
+  priv->read_pending = FALSE;
 
   return g_usb_device_claim_interface(fpi_device_get_usb_device(dev), class->interface, 0,
                                       error);
@@ -1207,6 +1225,13 @@ goodix_dev_deinit(FpDevice *dev, GError **error)
   g_free(priv->data);
 
   goodix_stop_read_loop(dev);
+
+  /* Deinit is the only path that truly abandons the loop: abort a
+   * dangling in-flight read so its callback cannot fire after the
+   * device is gone. Mid-test stops (deactivate/cancel) must NOT cancel,
+   * the orphaned read is adopted by the next start instead. */
+  if (priv->transfer_cancel_tkn)
+    g_cancellable_cancel(priv->transfer_cancel_tkn);
 
   GError *tls_error = NULL;
   goodix_shutdown_tls(dev, &tls_error);
@@ -1284,6 +1309,14 @@ on_tls_successfully_established(FpDevice *dev, gpointer user_data, GError *error
   fp_dbg("HANDSHAKE DONE");
   FpiDeviceGoodixTls *self = FPI_DEVICE_GOODIXTLS(dev);
   FpiDeviceGoodixTlsPrivate *priv = fpi_device_goodixtls_get_instance_private(self);
+  /* The 0xd4 notification is sent with reply=FALSE and a 10 ms timer, and
+   * the device never answers it, so a timeout here is the expected outcome
+   * (see goodix_send_tls_successfully_established), not a failure: report
+   * success to the parked task SSM as the pre-381d5ac code did. Any other
+   * error (notably CANCELLED or a dead-device transfer failure) is
+   * forwarded so the operation terminates instead of hanging. */
+  if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT))
+    g_clear_error (&error);
   /* Forward ownership of error as-is; the task SSM is parked waiting for
    * this callback, so it must be completed exactly once. */
   if (priv->tls_ready_callback)
