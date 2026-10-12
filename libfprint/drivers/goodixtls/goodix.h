@@ -147,9 +147,10 @@ goodix_start_read_loop(FpDevice *dev);
 /**
  * @brief Stop the read loop started by goodix_start_read_loop().
  *
- * Marks the loop stopped and cancels the private transfer token so the
- * in-flight bulk read aborts; its callback then fails the pending command
- * with G_IO_ERROR_CANCELLED instead of resubmitting. Idempotent.
+ * Marks the loop stopped so no new transfer is submitted; an in-flight
+ * bulk read is NOT aborted and its bytes are adopted by the next
+ * generation after restart (see read_pending). The private transfer
+ * token is cancelled only in goodix_dev_deinit. Idempotent.
  *
  * @param dev
  */
