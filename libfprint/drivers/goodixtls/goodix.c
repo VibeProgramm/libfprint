@@ -1284,9 +1284,21 @@ on_tls_successfully_established(FpDevice *dev, gpointer user_data, GError *error
   fp_dbg("HANDSHAKE DONE");
   FpiDeviceGoodixTls *self = FPI_DEVICE_GOODIXTLS(dev);
   FpiDeviceGoodixTlsPrivate *priv = fpi_device_goodixtls_get_instance_private(self);
-  ((GoodixNoneCallback)priv->tls_ready_callback->callback)(
-      dev, priv->tls_ready_callback->user_data, NULL);
-  g_clear_pointer(&priv->tls_ready_callback, g_free);
+  /* Forward ownership of error as-is; the task SSM is parked waiting for
+   * this callback, so it must be completed exactly once. */
+  if (priv->tls_ready_callback)
+    {
+      GoodixNoneCallback ready_cb
+          = (GoodixNoneCallback)priv->tls_ready_callback->callback;
+      gpointer ready_data = priv->tls_ready_callback->user_data;
+
+      g_clear_pointer(&priv->tls_ready_callback, g_free);
+      ready_cb(dev, ready_data, error);
+    }
+  else
+    {
+      g_clear_error(&error);
+    }
 }
 static void
 tls_handshake_done(FpiSsm *ssm, FpDevice *dev, GError *error)
@@ -1410,8 +1422,21 @@ on_goodix_request_tls_connection(FpDevice *dev, guint8 *data, guint16 length,
           return;
         }
       fp_err("failed to get tls handshake: %s", error->message);
-      g_clear_error(&error);
-      goodix_send_tls_successfully_established(FP_DEVICE(dev), NULL, NULL);
+      /* Same ownership as the CANCELLED branch above: forward the error to
+       * the parked task SSM exactly once instead of hanging it. */
+      if (priv->tls_ready_callback)
+        {
+          GoodixNoneCallback ready_cb
+              = (GoodixNoneCallback)priv->tls_ready_callback->callback;
+          gpointer ready_data = priv->tls_ready_callback->user_data;
+
+          g_clear_pointer(&priv->tls_ready_callback, g_free);
+          ready_cb(dev, ready_data, error);
+        }
+      else
+        {
+          g_clear_error(&error);
+        }
       return;
     }
   FpiDeviceGoodixTls *self = FPI_DEVICE_GOODIXTLS(user_data);
@@ -1456,7 +1481,21 @@ goodix_tls_init(FpDevice *dev, GoodixNoneCallback callback, gpointer user_data)
       fp_err ("failed to init tls server: %s (code: %d)",
               err ? err->message : "unknown", err ? err->code : -1);
       g_clear_pointer (&priv->tls_hop, g_free);
-      g_clear_error (&err);
+      /* The task SSM is parked on tls_ready_callback; complete it exactly
+       * once so it cannot hang. */
+      if (priv->tls_ready_callback)
+        {
+          GoodixNoneCallback ready_cb
+              = (GoodixNoneCallback)priv->tls_ready_callback->callback;
+          gpointer ready_data = priv->tls_ready_callback->user_data;
+
+          g_clear_pointer (&priv->tls_ready_callback, g_free);
+          ready_cb (dev, ready_data, err);
+        }
+      else
+        {
+          g_clear_error (&err);
+        }
       return;
     }
 
