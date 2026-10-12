@@ -25,8 +25,17 @@ Goal (not upstream-merge): track upstream master with minimum own delta.
    - `data/autosuspend.hwdb`, `libfprint/fprint-list-udev-hwdb.c` →
      keep 5110 out of the GENERATED unsupported block; if upstream
      added a `sync-*` target, run it instead of hand-editing
-   - driver sources: plain copy, then re-apply topic (3) commits
-     (`git cherry-pick -n` from the previous modern branch)
+   - driver sources: plain copy, then re-apply the three topic hunks
+     from the previous modern branch diff (they live inside one import
+     commit, not as separate commits — do NOT look for them with
+     cherry-pick):
+       a. read-loop guard: `consecutive_errors` counter + early-out in
+          `goodix_receive_data_cb` (`goodix.c`)
+       b. verify-drop: single removed `dev_cls->verify` line
+          (`goodix5xx.c`)
+       c. emulation API: `FpDevice *dev` param through
+          `goodix_tls_server_init` + `fpi_device_emulation_mode_enabled`
+          (`goodixtls.c/h`, `goodix.c` call site)
 4. `meson setup /tmp/...` (no `-Dc_args` crutch — tree must be
    warning-free) + `ninja` + `meson test` (expect: unit OK, replay
    SKIP without umockdev, metainfo may fail offline — pre-existing).
