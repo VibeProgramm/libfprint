@@ -61,6 +61,7 @@ drivers_tests = {
 	'realtek-5816': {},
 	'realtek-storage-errors': {},
     'focaltech_moc': { 'timeout': 30 },
+    'goodixtls511': { 'timeout': 30 },
     'focaltech_moc-6553': {},
     'mafpmoc': {},
     'secugen': {},
