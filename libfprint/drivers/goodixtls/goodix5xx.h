@@ -194,12 +194,15 @@ goodixtls5xx_check_none_cmd(FpDevice *dev, guint8 *data, guint16 len, gpointer s
  * @note Doesn't decrypt it
  *
  * @param frame
- * @param frame_size
+ * @param frame_size raw input length in bytes (must be >= 13 and
+ * (frame_size - 13) % 6 == 0)
  * @param raw_frame
+ * @param error return location for invalid length
+ * @return TRUE on success, FALSE with error set on invalid length
  */
-void
+gboolean
 goodixtls5xx_decode_frame(GoodixTls5xxPix *frame, guint32 frame_size,
-                          const guint8 *raw_frame);
+                          const guint8 *raw_frame, GError **error);
 
 /**
  * @brief Initalise the TLS for the device

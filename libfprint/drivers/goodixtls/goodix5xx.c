@@ -99,7 +99,12 @@ on_calibrate_scan(FpDevice *dev, guint8 *data, guint16 len, gpointer ssm, GError
       priv->calibration_img
           = g_malloc0(cls->scan_height * cls->scan_width * sizeof(GoodixTls5xxPix));
     }
-  goodixtls5xx_decode_frame(priv->calibration_img, len, data);
+  GError *decode_err = NULL;
+  if (!goodixtls5xx_decode_frame(priv->calibration_img, len, data, &decode_err))
+    {
+      fpi_ssm_mark_failed(ssm, decode_err);
+      return;
+    }
 
   fpi_ssm_next_state(ssm);
 }
@@ -449,10 +454,9 @@ goodixtls5xx_unsharp_mask_inplace(guint8 *img, int w, int h)
 static void
 linear_subtract_inplace(GoodixTls5xxPix *src, GoodixTls5xxPix *by, guint16 len)
 {
-  const guint16 max = -1;
   for (guint16 n = 0; n != len; ++n)
     {
-      src[n] = MAX(0, max - ((max - src[n]) - (max - by[n])));
+      src[n] = src[n] >= by[n] ? src[n] - by[n] : 0;
     }
 }
 
@@ -471,7 +475,13 @@ scan_on_read_img(FpDevice *dev, guint8 *data, guint16 len, gpointer ssm, GError 
 
   GoodixTls5xxPix *raw_frame
       = g_malloc0(cls->scan_width * cls->scan_height * sizeof(GoodixTls5xxPix));
-  goodixtls5xx_decode_frame(raw_frame, len, data);
+  GError *decode_err = NULL;
+  if (!goodixtls5xx_decode_frame(raw_frame, len, data, &decode_err))
+    {
+      g_free(raw_frame);
+      fpi_ssm_mark_failed(ssm, decode_err);
+      return;
+    }
   linear_subtract_inplace(raw_frame, priv->calibration_img,
                           cls->scan_width * cls->scan_height);
 
@@ -673,10 +683,17 @@ scan_run_state(FpiSsm *ssm, FpDevice *dev)
     }
 }
 
-void
+gboolean
 goodixtls5xx_decode_frame(GoodixTls5xxPix *frame, guint32 frame_size,
-                          const guint8 *raw_frame)
+                          const guint8 *raw_frame, GError **error)
 {
+  if (frame_size < 13 || (frame_size - 13) % 6 != 0)
+    {
+      g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                  "Invalid raw frame length: %u", frame_size);
+      return FALSE;
+    }
+
   GoodixTls5xxPix *pix = frame;
 
   for (int i = 8; i != frame_size - 5; i += 6)
@@ -687,6 +704,8 @@ goodixtls5xx_decode_frame(GoodixTls5xxPix *frame, guint32 frame_size,
       *pix++ = ((chunk[5] & 0xf) << 8) + chunk[2];
       *pix++ = (chunk[4] << 4) + (chunk[5] >> 4);
     }
+
+  return TRUE;
 }
 
 /* ---- Deactivation helper (called at end of enroll/verify) ---- */

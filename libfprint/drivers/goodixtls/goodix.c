@@ -369,6 +369,12 @@ goodix_receive_protocol(FpDevice *dev, guint8 *data, guint32 length)
   goodix_receive_done(dev, payload, payload_len, NULL);
 }
 
+/* Upper bound for the pack reassembly buffer. A complete pack carries
+ * at most 0xFFFF payload bytes plus header, so twice the bulk-IN
+ * size comfortably fits any legitimate packet while preventing
+ * unbounded growth on malformed input that never decodes. */
+#define GOODIX_MAX_PACK_BUF (GOODIX_EP_IN_MAX_BUF_SIZE * 2)
+
 void
 goodix_receive_pack(FpDevice *dev, guint8 *data, guint32 length)
 {
@@ -378,6 +384,20 @@ goodix_receive_pack(FpDevice *dev, guint8 *data, guint32 length)
   g_autofree guint8 *payload = NULL;
   guint16 payload_len;
   gboolean valid_checksum; // TODO implement checksum.
+
+  if (priv->length > GOODIX_MAX_PACK_BUF
+      || length > GOODIX_MAX_PACK_BUF - priv->length)
+    {
+      GError *acc_err = NULL;
+
+      g_set_error(&acc_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                  "Accumulated packet too large (%u + %u bytes), resetting",
+                  priv->length, length);
+      g_clear_pointer(&priv->data, g_free);
+      priv->length = 0;
+      goodix_receive_done(dev, NULL, 0, acc_err);
+      return;
+    }
 
   priv->data = g_realloc(priv->data, priv->length + length);
   memcpy(priv->data + priv->length, data, length);
@@ -428,7 +448,8 @@ goodix_receive_data_cb(FpiUsbTransfer *transfer, FpDevice *dev, gpointer user_da
   /* The flight has landed. */
   priv->read_pending = FALSE;
 
-  if (!priv->inited || g_cancellable_is_cancelled(priv->transfer_cancel_tkn))
+  if (!priv->inited || !priv->transfer_cancel_tkn
+      || g_cancellable_is_cancelled(priv->transfer_cancel_tkn))
     {
       /* The loop was stopped via goodix_stop_read_loop() (action
        * cancellation through dev_cancel, or device deinit). Fail the
@@ -523,7 +544,9 @@ goodix_start_read_loop(FpDevice *dev)
   else
     priv->inited = TRUE;
   priv->consecutive_errors = 0;
-  if (g_cancellable_is_cancelled(priv->transfer_cancel_tkn))
+  if (!priv->transfer_cancel_tkn)
+    priv->transfer_cancel_tkn = g_cancellable_new();
+  else if (g_cancellable_is_cancelled(priv->transfer_cancel_tkn))
     g_cancellable_reset(priv->transfer_cancel_tkn);
 
   /* Do not overlap reads: an in-flight transfer orphaned by
@@ -1192,6 +1215,7 @@ goodix_dev_init(FpDevice *dev, GError **error)
   priv->user_data = NULL;
   priv->data = NULL;
   priv->length = 0;
+  g_clear_object(&priv->transfer_cancel_tkn);
   priv->transfer_cancel_tkn = g_cancellable_new();
   priv->consecutive_errors = 0;
   priv->read_pending = FALSE;
@@ -1232,6 +1256,7 @@ goodix_dev_deinit(FpDevice *dev, GError **error)
    * the orphaned read is adopted by the next start instead. */
   if (priv->transfer_cancel_tkn)
     g_cancellable_cancel(priv->transfer_cancel_tkn);
+  g_clear_object(&priv->transfer_cancel_tkn);
 
   GError *tls_error = NULL;
   goodix_shutdown_tls(dev, &tls_error);
@@ -1574,9 +1599,19 @@ goodix_tls_ready_image_handler(FpDevice *dev, guint8 *data, guint16 length,
   GError *err = NULL;
   int read_size = goodix_tls_server_read(priv->tls_hop, buff, size, &err);
 
-  if (read_size <= 0)
+  if (read_size < 0)
     {
       g_free(buff);
+      callback(dev, NULL, 0, cb_info->user_data, err);
+      g_free(cb_info);
+      return;
+    }
+
+  if (read_size == 0)
+    {
+      g_free(buff);
+      g_set_error(&err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                  "Empty TLS image reply");
       callback(dev, NULL, 0, cb_info->user_data, err);
       g_free(cb_info);
       return;

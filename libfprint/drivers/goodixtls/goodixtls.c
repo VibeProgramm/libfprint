@@ -125,6 +125,8 @@ goodix_tls_server_init(GoodixTlsServer *self, FpDevice *dev, GError **error)
     {
       g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED,
                   "gnutls_psk_allocate_server_credentials: %s", gnutls_strerror(r));
+      g_clear_pointer(&self->in_buf, g_byte_array_unref);
+      g_clear_pointer(&self->out_buf, g_byte_array_unref);
       return FALSE;
     }
 
@@ -136,6 +138,8 @@ goodix_tls_server_init(GoodixTlsServer *self, FpDevice *dev, GError **error)
       g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "gnutls_init: %s",
                   gnutls_strerror(r));
       gnutls_psk_free_server_credentials(self->creds);
+      g_clear_pointer(&self->in_buf, g_byte_array_unref);
+      g_clear_pointer(&self->out_buf, g_byte_array_unref);
       return FALSE;
     }
 
@@ -146,6 +150,8 @@ goodix_tls_server_init(GoodixTlsServer *self, FpDevice *dev, GError **error)
                   gnutls_strerror(r));
       gnutls_deinit(self->session);
       gnutls_psk_free_server_credentials(self->creds);
+      g_clear_pointer(&self->in_buf, g_byte_array_unref);
+      g_clear_pointer(&self->out_buf, g_byte_array_unref);
       return FALSE;
     }
 
