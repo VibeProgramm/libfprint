@@ -603,6 +603,16 @@ scan_get_img(FpDevice *dev, FpiSsm *ssm)
 static void
 scan_run_state(FpiSsm *ssm, FpDevice *dev)
 {
+  /* Cheap gap cover: a cancellation landing between two transfers leaves
+   * no pending command to fail, so poll here instead of sending the next
+   * command. */
+  if (fpi_device_action_is_cancelled (dev))
+    {
+      fpi_ssm_mark_failed (ssm, g_error_new (G_IO_ERROR, G_IO_ERROR_CANCELLED,
+                                             "Operation cancelled"));
+      return;
+    }
+
   switch (fpi_ssm_get_cur_state(ssm))
     {
     case SCAN_STAGE_QUERY_MCU:
@@ -686,6 +696,19 @@ deactivate_device (FpDevice *dev)
 {
   GError *error = NULL;
 
+  /* Stop the finger-wait read loop first: without this a VerifyStop /
+   * Release cancellation can never interrupt the blocking bulk reads and
+   * fprintd waits for the operation forever. */
+  goodix_stop_read_loop (dev);
+
+  /* Fail any pending command so the waiting SSM terminates instead of
+   * hanging (mirrors the fatal-transfer path in goodix_receive_data_cb;
+   * the error is dropped when no command is pending, keeping completion
+   * exactly-once). */
+  goodix_receive_done (dev, NULL, 0,
+                       g_error_new (G_IO_ERROR, G_IO_ERROR_CANCELLED,
+                                    "Device deactivated"));
+
   goodix_reset_state (dev);
 
   goodix_shutdown_tls (dev, &error);
@@ -705,7 +728,16 @@ deactivate_device (FpDevice *dev)
     cls->reset_state (dev);
 }
 
-/* ---- FpDevice open/close ---- */
+/* ---- FpDevice open/close/cancel ---- */
+
+/* Mirror the image-device contract (cancelled deactivate): stop the read
+ * loop and fail the pending command so the task SSM terminates and the
+ * action completes instead of hanging fprintd. */
+static void
+dev_cancel (FpDevice *dev)
+{
+  deactivate_device (dev);
+}
 
 static void
 dev_open (FpDevice *dev)
@@ -1019,6 +1051,16 @@ enroll_run_state (FpiSsm *ssm, FpDevice *dev)
     fpi_device_goodixtls5xx_get_instance_private (self);
   FpiDeviceGoodixTls5xxClass *cls = FPI_DEVICE_GOODIXTLS5XX_GET_CLASS (dev);
 
+  /* Cheap gap cover: a cancellation landing between two transfers leaves
+   * no pending command to fail, so poll here instead of running the next
+   * state. */
+  if (fpi_device_action_is_cancelled (dev))
+    {
+      fpi_ssm_mark_failed (ssm, g_error_new (G_IO_ERROR, G_IO_ERROR_CANCELLED,
+                                             "Operation cancelled"));
+      return;
+    }
+
   switch (fpi_ssm_get_cur_state (ssm))
     {
     case ENROLL_ACTIVATE:
@@ -1177,6 +1219,16 @@ verify_run_state (FpiSsm *ssm, FpDevice *dev)
   FpiDeviceGoodixTls5xxPrivate *priv =
     fpi_device_goodixtls5xx_get_instance_private (self);
   FpiDeviceGoodixTls5xxClass *cls = FPI_DEVICE_GOODIXTLS5XX_GET_CLASS (dev);
+
+  /* Cheap gap cover: a cancellation landing between two transfers leaves
+   * no pending command to fail, so poll here instead of running the next
+   * state. */
+  if (fpi_device_action_is_cancelled (dev))
+    {
+      fpi_ssm_mark_failed (ssm, g_error_new (G_IO_ERROR, G_IO_ERROR_CANCELLED,
+                                             "Operation cancelled"));
+      return;
+    }
 
   switch (fpi_ssm_get_cur_state (ssm))
     {
@@ -1358,6 +1410,7 @@ fpi_device_goodixtls5xx_class_init(FpiDeviceGoodixTls5xxClass *self)
 
   dev_cls->open     = dev_open;
   dev_cls->close    = dev_close;
+  dev_cls->cancel   = dev_cancel;
   dev_cls->enroll   = dev_enroll;
   dev_cls->identify = dev_verify_identify;
 }

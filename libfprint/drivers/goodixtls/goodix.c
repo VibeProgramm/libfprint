@@ -420,8 +420,17 @@ goodix_receive_data_cb(FpiUsbTransfer *transfer, FpDevice *dev, gpointer user_da
 
   if (!priv->inited || g_cancellable_is_cancelled(priv->transfer_cancel_tkn))
     {
-      fp_dbg("read loop stopped, discarding transfer");
+      /* The loop was stopped via goodix_stop_read_loop() (action
+       * cancellation through dev_cancel, or device deinit). Fail the
+       * pending command so the waiting SSM terminates with CANCELLED
+       * instead of hanging; never resubmit from here.
+       * goodix_receive_done() drops the error when no command is pending,
+       * which keeps completion exactly-once. */
+      fp_dbg("read loop stopped, failing pending command");
       g_clear_error(&error);
+      goodix_receive_done(dev, NULL, 0,
+                          g_error_new(G_IO_ERROR, G_IO_ERROR_CANCELLED,
+                                      "Read loop stopped"));
       return;
     }
   if (error)
@@ -508,6 +517,22 @@ goodix_start_read_loop(FpDevice *dev)
     g_cancellable_reset(priv->transfer_cancel_tkn);
 
   goodix_receive_data(dev);
+}
+
+/* Stop the background read loop started by goodix_start_read_loop().
+ * Aborts the in-flight bulk transfer by cancelling the private token;
+ * the callback then fails the pending command (see
+ * goodix_receive_data_cb) instead of resubmitting.
+ * Idempotent: safe to call from deactivate, cancel and deinit paths. */
+void
+goodix_stop_read_loop(FpDevice *dev)
+{
+  FpiDeviceGoodixTls *self = FPI_DEVICE_GOODIXTLS(dev);
+  FpiDeviceGoodixTlsPrivate *priv = fpi_device_goodixtls_get_instance_private(self);
+
+  priv->inited = FALSE;
+  if (priv->transfer_cancel_tkn)
+    g_cancellable_cancel(priv->transfer_cancel_tkn);
 }
 
 void
@@ -1181,8 +1206,7 @@ goodix_dev_deinit(FpDevice *dev, GError **error)
     g_source_destroy(priv->timeout);
   g_free(priv->data);
 
-  priv->inited = FALSE;
-  g_cancellable_cancel(priv->transfer_cancel_tkn);
+  goodix_stop_read_loop(dev);
 
   GError *tls_error = NULL;
   goodix_shutdown_tls(dev, &tls_error);
@@ -1269,8 +1293,25 @@ tls_handshake_done(FpiSsm *ssm, FpDevice *dev, GError *error)
 {
   if (error)
     {
+      FpiDeviceGoodixTls *self = FPI_DEVICE_GOODIXTLS(dev);
+      FpiDeviceGoodixTlsPrivate *priv = fpi_device_goodixtls_get_instance_private(self);
+
       fp_err("TLS handshake failed: %s (code: %d)", error->message, error->code);
-      g_error_free(error);
+      /* The task SSM is parked waiting for the TLS-ready callback; notify
+       * it so the operation terminates instead of hanging. */
+      if (priv->tls_ready_callback)
+        {
+          GoodixNoneCallback ready_cb
+              = (GoodixNoneCallback)priv->tls_ready_callback->callback;
+          gpointer ready_data = priv->tls_ready_callback->user_data;
+
+          g_clear_pointer(&priv->tls_ready_callback, g_free);
+          ready_cb(dev, ready_data, error);
+        }
+      else
+        {
+          g_error_free(error);
+        }
       return;
     }
   goodix_send_tls_successfully_established(dev, on_tls_successfully_established, NULL);
@@ -1345,7 +1386,31 @@ on_goodix_request_tls_connection(FpDevice *dev, guint8 *data, guint16 length,
 {
   if (error)
     {
+      FpiDeviceGoodixTls *self = FPI_DEVICE_GOODIXTLS(user_data);
+      FpiDeviceGoodixTlsPrivate *priv = fpi_device_goodixtls_get_instance_private(self);
+
+      /* A cancellation lands here while the task SSM is parked on this
+       * command; the loop is already stopped, so just forward the error
+       * to the waiting task SSM instead of hanging. */
+      if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+        {
+          if (priv->tls_ready_callback)
+            {
+              GoodixNoneCallback ready_cb
+                  = (GoodixNoneCallback)priv->tls_ready_callback->callback;
+              gpointer ready_data = priv->tls_ready_callback->user_data;
+
+              g_clear_pointer(&priv->tls_ready_callback, g_free);
+              ready_cb(dev, ready_data, error);
+            }
+          else
+            {
+              g_clear_error(&error);
+            }
+          return;
+        }
       fp_err("failed to get tls handshake: %s", error->message);
+      g_clear_error(&error);
       goodix_send_tls_successfully_established(FP_DEVICE(dev), NULL, NULL);
       return;
     }
