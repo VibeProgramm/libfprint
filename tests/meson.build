@@ -95,6 +95,15 @@ test_emulation.set_quoted('FPI_EMULATION_HELPER_MODULE',
   fs.name(test_emulation_lib.full_path()))
 configure_file(output: 'fpi-test-emulation.h', configuration: test_emulation)
 
+# Deterministic RNG shim for the goodixtls511 pcap-replay test. With
+# FP_DEVICE_EMULATION=1 it replaces gnutls_rnd() with a counter so TLS
+# handshake bytes are byte-identical across record and replay runs;
+# without the variable it passes through to the real implementation.
+getrandom_seed = shared_library('getrandom-seed',
+    'getrandom-seed.c',
+    dependencies: [cc.find_library('dl', required: false)],
+)
+
 env_parser_cmd = '''
 import os;
 print(" ".join([f"{k}={v}" for k, v in os.environ.items()
@@ -198,6 +207,9 @@ if get_option('introspection')
         driver_name = driver_test.split('-')[0]
         driver_envs = envs
         driver_envs.set('FP_DRIVERS_ALLOWLIST', driver_name)
+        if driver_name == 'goodixtls511'
+            driver_envs.prepend('LD_PRELOAD', getrandom_seed.full_path())
+        endif
 
         if (driver_name in supported_drivers and
             gusb_dep.version().version_compare('>= 0.3.0'))
@@ -240,6 +252,7 @@ if get_option('introspection')
                     depends: [
                         libfprint_typelib,
                         test_emulation_lib,
+                        getrandom_seed,
                     ],
                 )
             endforeach
